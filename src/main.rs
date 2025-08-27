@@ -1,0 +1,226 @@
+
+#![feature(generic_const_exprs)]
+
+mod lerp_angle;
+use lerp_angle::lerp_angle;
+
+mod systems;
+
+mod components;
+
+use bevy::{
+    prelude::*,
+    window::PrimaryWindow,
+};
+use rand::Rng;
+
+use bevy_spatial::{AutomaticUpdate, kdtree::KDTree2, TransformMode, SpatialAccess, SpatialStructure};
+
+#[derive(Component, Default)]
+struct TrackedByKDTree;
+type NNTree = KDTree2<TrackedByKDTree>; // type alias for later
+
+const BOID_RADIUS:f32 = 30.0;
+const BOID_CROWDING_RADIUS:f32 = 10.0;
+const BOID_VISION_CONE_RADIUS_RADIANS:f32 = 120f32.to_radians();
+
+pub const GRID_SIZE_X:usize = 80;
+pub const GRID_SIZE_Y:usize = 40;
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_plugins(AutomaticUpdate::<TrackedByKDTree>::new()
+            .with_spatial_ds(SpatialStructure::KDTree2)
+            .with_frequency(std::time::Duration::from_secs_f32(0.3))
+            .with_transform(TransformMode::GlobalTransform))
+        .insert_resource(Time::<Fixed>::from_hz(60.0))
+        //.insert_resource(BoidProximityGrid::new())
+        .add_systems(Startup, setup)
+        .add_systems(FixedUpdate,
+        (
+            boid_rotate_to_face_group,
+            boid_move_forward,
+            boid_screen_wrap,
+            //systems::debug::grid_neighbors
+        ))
+        //.add_systems(Update, )
+        .run();
+}
+
+/// Player component
+#[derive(Component)]
+struct Player {}
+
+#[derive(Component)]
+struct Boid {
+    facing:f32,
+    speed:f32,
+}
+
+
+
+fn setup(
+    mut commands: Commands, asset_server: Res<AssetServer>,
+    window:Query<&Window, With<PrimaryWindow>>,
+) {
+    let window = window.single().unwrap();
+    let window_width = window.width();
+    let window_height = window.height();
+    let mut rng = rand::rng();
+    let fish = asset_server.load("fish.png");
+    let shark = asset_server.load("shark.png");
+
+    commands.spawn(Camera2d);
+    
+    commands.spawn((
+        Player{},
+        Sprite::from_image(shark.clone()),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+    ));
+
+    for _ in 0..5_000 {
+        commands.spawn((
+            Boid{
+                facing:rng.random::<f32>()*3.141*2.0,
+                speed:1.0,
+            },
+            Sprite::from_image(fish.clone()),
+            Transform::from_xyz(
+                (rng.random::<f32>()*1.0-0.5)*window_width,
+                (rng.random::<f32>()*1.0-0.5)*window_height,
+                0.0
+            ).with_scale((0.1,0.1,0.1).into()),
+            TrackedByKDTree,
+            //ProximityGridStatus{inserted_at:None},
+        ));
+    }
+}
+
+
+
+fn boid_screen_wrap(
+   mut boids: Query<&mut Transform, With<Boid>>,
+   camera: Single<(&Camera, &GlobalTransform)>,
+) {
+   let (camera, _camera_transform) = *camera;
+   let Some(viewport_size) = camera.logical_viewport_size() else { return };
+   let half_width = viewport_size.x / 2.0;
+   let half_height = viewport_size.y / 2.0;
+   
+   boids.iter_mut().for_each(|mut transform| {
+       if transform.translation.x > half_width {
+           transform.translation.x = -half_width;
+       } else if transform.translation.x < -half_width {
+           transform.translation.x = half_width;
+       }
+       
+       if transform.translation.y > half_height {
+           transform.translation.y = -half_height;
+       } else if transform.translation.y < -half_height {
+           transform.translation.y = half_height;
+       }
+   });
+}
+
+
+fn boid_move_forward(mut q:Query<(&Boid, &mut Transform), With<Boid>>){
+    q.iter_mut().for_each(|(b, mut t)|{
+        t.translation.x+=b.speed*b.facing.cos();
+        t.translation.y+=b.speed*b.facing.sin();
+        t.rotation = Quat::from_rotation_z(b.facing);
+    })
+}
+
+#[derive(Clone, Copy)]
+pub struct BoidThoughts {
+    group_facing:Vec2,
+    member_avoidance:Option<Vec2>,
+    group_centroid:Vec2,
+}
+
+fn boid_rotate_to_face_group(
+    mut boids:Query<(Entity, &mut Boid, &Transform)>,
+    kdtree: Res<NNTree>,
+) {
+    
+    let new_facings:Vec<f32> = boids.iter().map(|(entity, boid, transform)| {
+
+        let thoughts: Vec<BoidThoughts> = 
+            kdtree
+            .within_distance(transform.translation.truncate(), BOID_RADIUS)
+            .into_iter()
+            .filter_map(|item| match item {
+                (v,Some(e)) if e!=entity => Some((v,e)),
+                _ => None
+            } )
+            .filter_map(|(_other_position, other_entity)|{
+            
+            let Ok((_, other_boid, other_transform)) =  boids.get(other_entity) else {return None};
+
+            let facing = Vec2::from_angle(boid.facing);
+            let ab = (other_transform.translation - transform.translation).truncate();
+            
+            let distance = ab.length();
+            let ab_norm  = ab / distance; // TODO: risk of baNaNas
+
+            // acos(a.b) = theta
+
+            let other_boid_is_visible =  facing.dot(ab_norm).acos().abs() < BOID_VISION_CONE_RADIUS_RADIANS && distance < BOID_RADIUS;
+
+            let other_boid_is_crowding = distance < BOID_CROWDING_RADIUS;
+            if other_boid_is_visible {
+                Some(BoidThoughts{
+                    group_facing     : Vec2::from_angle(other_boid.facing),
+                    member_avoidance : if other_boid_is_crowding { Some(-ab_norm) }else{ None },
+                    group_centroid   : other_transform.translation.truncate(),
+                })
+            }else{
+                None
+            }
+        }).collect();
+        let thoughts_length = thoughts.len();
+
+        if thoughts_length==0 {return boid.facing} // head empty
+
+
+
+        let group_facing  :Vec2 = thoughts.iter().map(|thought|thought.group_facing  ).sum::<Vec2>() / (thoughts_length as f32);
+        let group_centroid:Vec2 = thoughts.iter().map(|thought|thought.group_centroid).sum::<Vec2>() / (thoughts_length as f32);
+        
+        let (member_avoidance_sum, member_avoidance_count) = thoughts.iter()
+            .map(|thought| thought.member_avoidance)
+            .fold((Vec2::ZERO, 0), |acc, member_avoidance| {
+                match member_avoidance {
+                    Some(x)=>(acc.0+x,acc.1+1),
+                    None=>acc
+                }
+            });
+        
+        
+        
+        
+        let ab = group_centroid - transform.translation.truncate();
+        let face_group_centroid = ab.to_angle();
+
+        let result = lerp_angle(
+            lerp_angle(
+                boid.facing,
+                group_facing.to_angle(),
+                0.02
+            ),
+            face_group_centroid,
+            0.03
+        );
+        if member_avoidance_count==0 {
+            result
+        }else{
+            let average_member_avoidance = member_avoidance_sum / (member_avoidance_count as f32);
+            lerp_angle(result, average_member_avoidance.to_angle(),0.04)
+        }
+    }).collect();
+    
+    boids.iter_mut().zip(new_facings).for_each(|((_, mut boid, _), new_facing)|{
+        boid.facing = new_facing
+    });
+}
