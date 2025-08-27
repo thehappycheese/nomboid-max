@@ -9,8 +9,7 @@ mod systems;
 mod components;
 
 use bevy::{
-    prelude::*,
-    window::PrimaryWindow,
+    input::common_conditions::input_just_pressed, prelude::*, window::PrimaryWindow
 };
 use rand::Rng;
 
@@ -22,23 +21,32 @@ type NNTree = KDTree2<TrackedByKDTree>; // type alias for later
 
 const BOID_RADIUS:f32 = 30.0;
 const BOID_CROWDING_RADIUS:f32 = 10.0;
-const BOID_VISION_CONE_RADIUS_RADIANS:f32 = 120f32.to_radians();
+const BOID_VISION_CONE_RADIUS_RADIANS:f32 = 110f32.to_radians();
 
 pub const GRID_SIZE_X:usize = 80;
 pub const GRID_SIZE_Y:usize = 40;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(WindowPlugin{
+            primary_window: Some(Window {
+                mode: bevy::window::WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current),
+                
+                ..default()
+            }),
+            ..default()
+        }))
         .add_plugins(AutomaticUpdate::<TrackedByKDTree>::new()
             .with_spatial_ds(SpatialStructure::KDTree2)
-            .with_frequency(std::time::Duration::from_secs_f32(0.3))
+            .with_frequency(std::time::Duration::from_secs_f32(0.4))
             .with_transform(TransformMode::GlobalTransform))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
         //.insert_resource(BoidProximityGrid::new())
         .add_systems(Startup, setup)
+        
         .add_systems(FixedUpdate,
         (
+            esc_to_exit.run_if(input_just_pressed(KeyCode::Escape)),
             boid_rotate_to_face_group,
             boid_move_forward,
             boid_screen_wrap,
@@ -59,6 +67,10 @@ struct Boid {
 }
 
 
+fn esc_to_exit(mut exit: EventWriter<AppExit>) {
+    exit.write(AppExit::Success);
+}
+
 
 fn setup(
     mut commands: Commands, asset_server: Res<AssetServer>,
@@ -69,21 +81,21 @@ fn setup(
     let window_height = window.height();
     let mut rng = rand::rng();
     let fish = asset_server.load("fish.png");
-    let shark = asset_server.load("shark.png");
+    //let shark = asset_server.load("shark.png");
 
     commands.spawn(Camera2d);
     
-    commands.spawn((
-        Player{},
-        Sprite::from_image(shark.clone()),
-        Transform::from_xyz(0.0, 0.0, 0.0),
-    ));
+    // commands.spawn((
+    //     Player{},
+    //     Sprite::from_image(shark.clone()),
+    //     Transform::from_xyz(0.0, 0.0, 0.0),
+    // ));
 
-    for _ in 0..5_000 {
+    for _ in 0..4_000 {
         commands.spawn((
             Boid{
                 facing:rng.random::<f32>()*3.141*2.0,
-                speed:1.0,
+                speed:0.6+rng.random::<f32>()*0.4,
             },
             Sprite::from_image(fish.clone()),
             Transform::from_xyz(
