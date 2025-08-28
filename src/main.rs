@@ -1,6 +1,3 @@
-
-#![feature(generic_const_exprs)]
-
 mod lerp_angle;
 use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use lerp_angle::lerp_angle;
@@ -56,14 +53,17 @@ impl Default for Config {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin{
-            primary_window: Some(Window {
-                mode: bevy::window::WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current),
-                
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+            // .set(WindowPlugin{
+            //     primary_window: Some(Window {
+            //         mode: bevy::window::WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current),
+                    
+            //         ..default()
+            //     }),
+            //     ..default()
+            // })
+        )
         .add_plugins(EguiPlugin::default())
         .add_plugins(AutomaticUpdate::<TrackedByKDTree>::new()
             .with_spatial_ds(SpatialStructure::KDTree2)
@@ -131,15 +131,10 @@ fn setup(
     let window_height = window.height();
     let mut rng = rand::rng();
     let fish = asset_server.load("fish.png");
-    //let shark = asset_server.load("shark.png");
 
     commands.spawn(Camera2d);
     
-    // commands.spawn((
-    //     Player{},
-    //     Sprite::from_image(shark.clone()),
-    //     Transform::from_xyz(0.0, 0.0, 0.0),
-    // ));
+
 
     for _ in 0..4_000 {
         commands.spawn((
