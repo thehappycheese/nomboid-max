@@ -2,6 +2,7 @@
 #![feature(generic_const_exprs)]
 
 mod lerp_angle;
+use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
 use lerp_angle::lerp_angle;
 
 mod systems;
@@ -13,18 +14,45 @@ use bevy::{
 };
 use rand::Rng;
 
-use bevy_spatial::{AutomaticUpdate, kdtree::KDTree2, TransformMode, SpatialAccess, SpatialStructure};
+use bevy_spatial::{
+    AutomaticUpdate,
+    kdtree::KDTree2,
+    TransformMode,
+    SpatialAccess,
+    SpatialStructure
+};
 
 #[derive(Component, Default)]
 struct TrackedByKDTree;
 type NNTree = KDTree2<TrackedByKDTree>; // type alias for later
 
-const BOID_RADIUS:f32 = 30.0;
-const BOID_CROWDING_RADIUS:f32 = 10.0;
-const BOID_VISION_CONE_RADIUS_RADIANS:f32 = 110f32.to_radians();
 
-pub const GRID_SIZE_X:usize = 80;
-pub const GRID_SIZE_Y:usize = 40;
+#[derive(Resource)]
+struct Config {
+    boid_vision_radius:f32,
+    boid_crowding_radius:f32,
+    boid_vision_cone_radius_radians:f32,
+    boid_base_speed:f32,
+    avoid_collide:f32,
+    face_group:f32,
+    group_centroid:f32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { 
+            boid_vision_radius              : 30.0,
+            boid_crowding_radius            : 10.0,
+            boid_vision_cone_radius_radians : 110f32.to_radians(),
+            boid_base_speed                 : 0.6,
+            avoid_collide                   : 0.03,
+            face_group                      : 0.03,
+            group_centroid                  : 0.03,
+        }
+    }
+}
+
+
 
 fn main() {
     App::new()
@@ -36,12 +64,13 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(EguiPlugin::default())
         .add_plugins(AutomaticUpdate::<TrackedByKDTree>::new()
             .with_spatial_ds(SpatialStructure::KDTree2)
             .with_frequency(std::time::Duration::from_secs_f32(0.4))
             .with_transform(TransformMode::GlobalTransform))
         .insert_resource(Time::<Fixed>::from_hz(60.0))
-        //.insert_resource(BoidProximityGrid::new())
+        .insert_resource(Config::default())
         .add_systems(Startup, setup)
         
         .add_systems(FixedUpdate,
@@ -50,9 +79,9 @@ fn main() {
             boid_rotate_to_face_group,
             boid_move_forward,
             boid_screen_wrap,
-            //systems::debug::grid_neighbors
         ))
-        //.add_systems(Update, )
+        .add_systems(EguiPrimaryContextPass, ui_example_system)
+        
         .run();
 }
 
@@ -69,6 +98,27 @@ struct Boid {
 
 fn esc_to_exit(mut exit: EventWriter<AppExit>) {
     exit.write(AppExit::Success);
+}
+
+fn ui_example_system(
+    mut contexts: EguiContexts,
+    mut exit: EventWriter<AppExit>,
+    mut config: ResMut<Config>,
+) -> Result {
+    egui::Window::new("NomBoids-Max").show(contexts.ctx_mut()?, |ui| {
+        ui.add(egui::Slider::new(&mut config.boid_vision_radius  , 0.0..=50.0).text("Vision Radius"));
+        ui.add(egui::Slider::new(&mut config.boid_crowding_radius, 0.0..=50.0).text("Crowding Radius"));
+        ui.add(egui::Slider::new(&mut config.boid_base_speed     , -1.0..=3.0).text("Base Speed"));
+        ui.add(egui::Slider::new(&mut config.boid_vision_cone_radius_radians, 0.0..=std::f32::consts::PI).text("Vision Cone Radians"));
+        ui.add(egui::Slider::new(&mut config.avoid_collide , 0.0..=0.06).text("avoid_collide"));
+        ui.add(egui::Slider::new(&mut config.face_group    , 0.0..=0.06).text("face_group"));
+        ui.add(egui::Slider::new(&mut config.group_centroid, 0.0..=0.06).text("group_centroid"));
+        ui.spacing();
+        if ui.button("Exit").clicked() {
+            exit.write(AppExit::Success);
+        }
+    });
+    Ok(())
 }
 
 
@@ -95,7 +145,7 @@ fn setup(
         commands.spawn((
             Boid{
                 facing:rng.random::<f32>()*3.141*2.0,
-                speed:0.6+rng.random::<f32>()*0.4,
+                speed:rng.random::<f32>()*0.4,
             },
             Sprite::from_image(fish.clone()),
             Transform::from_xyz(
@@ -136,10 +186,11 @@ fn boid_screen_wrap(
 }
 
 
-fn boid_move_forward(mut q:Query<(&Boid, &mut Transform), With<Boid>>){
+fn boid_move_forward(mut q:Query<(&Boid, &mut Transform), With<Boid>>, config:Res<Config>){
     q.iter_mut().for_each(|(b, mut t)|{
-        t.translation.x+=b.speed*b.facing.cos();
-        t.translation.y+=b.speed*b.facing.sin();
+        let speed = b.speed + config.boid_base_speed;
+        t.translation.x += speed*b.facing.cos();
+        t.translation.y += speed*b.facing.sin();
         t.rotation = Quat::from_rotation_z(b.facing);
     })
 }
@@ -154,13 +205,14 @@ pub struct BoidThoughts {
 fn boid_rotate_to_face_group(
     mut boids:Query<(Entity, &mut Boid, &Transform)>,
     kdtree: Res<NNTree>,
+    config: Res<Config>,
 ) {
     
     let new_facings:Vec<f32> = boids.iter().map(|(entity, boid, transform)| {
 
         let thoughts: Vec<BoidThoughts> = 
             kdtree
-            .within_distance(transform.translation.truncate(), BOID_RADIUS)
+            .within_distance(transform.translation.truncate(), config.boid_vision_radius)
             .into_iter()
             .filter_map(|item| match item {
                 (v,Some(e)) if e!=entity => Some((v,e)),
@@ -178,9 +230,11 @@ fn boid_rotate_to_face_group(
 
             // acos(a.b) = theta
 
-            let other_boid_is_visible =  facing.dot(ab_norm).acos().abs() < BOID_VISION_CONE_RADIUS_RADIANS && distance < BOID_RADIUS;
+            let other_boid_is_visible =  
+                   facing.dot(ab_norm).acos().abs() < config.boid_vision_cone_radius_radians
+                && distance                         < config.boid_vision_radius;
 
-            let other_boid_is_crowding = distance < BOID_CROWDING_RADIUS;
+            let other_boid_is_crowding = distance < config.boid_crowding_radius;
             if other_boid_is_visible {
                 Some(BoidThoughts{
                     group_facing     : Vec2::from_angle(other_boid.facing),
@@ -219,16 +273,23 @@ fn boid_rotate_to_face_group(
             lerp_angle(
                 boid.facing,
                 group_facing.to_angle(),
-                0.02
+                config.face_group,
+                //0.02
             ),
             face_group_centroid,
-            0.03
+            //0.03
+            config.group_centroid,
         );
         if member_avoidance_count==0 {
             result
         }else{
             let average_member_avoidance = member_avoidance_sum / (member_avoidance_count as f32);
-            lerp_angle(result, average_member_avoidance.to_angle(),0.04)
+            lerp_angle(
+                result,
+                average_member_avoidance.to_angle(),
+                config.avoid_collide
+                //0.04
+            )
         }
     }).collect();
     
